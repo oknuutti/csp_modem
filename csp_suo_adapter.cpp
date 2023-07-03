@@ -217,7 +217,7 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	
 	// Enough bit to 
 	if (frame.size() < sizeof(csp_id_t)) {
-		csp_log_warn("Too short frame! len: %lu\n", frame.size());
+		csp_log_error("Too short frame! len: %lu\n", frame.size());
 		return;
 	}
 
@@ -240,7 +240,7 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 		if (conf.use_libfec) {
 			// Enough bytes for Reed-Solomon decoder?
 			if (packet->length < CSP_RS_PARITYS || packet->length > (CSP_RS_MSGLEN + CSP_RS_PARITYS)) {
-				csp_log_warn("Invalid frame length for Reed-Solomon decoder. len: %d\n", packet->length);
+				csp_log_error("Invalid frame length for Reed-Solomon decoder. len: %d\n", packet->length);
 				return;
 			}
 
@@ -285,13 +285,23 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 	}
 
 	// Make sure there are enough bytes after RS decoder.
-	if (packet->length >= sizeof(csp_id_t)) {
-		csp_log_warn("Too short frame after decoding! len: %d\n", packet->length);
+	if (packet->length < sizeof(csp_id_t)) {
+		csp_log_error("Too short frame after decoding! len: %d\n", packet->length);
 		return;
 	}
 
 	/* The CSP packet length is without the header */
 	packet->length = frame.size() - sizeof(csp_id_t);
+
+	/* Ignore frame if source port indicates that it is coming from the ground segment.
+	   Do this before CRC/HMAC checks as those will fail on a tx packet if the rx/tx configs differ. */
+	packet->id.ext = csp_ntoh32(packet->id.ext);  // Convert the packet from network to host order
+	if (conf.rx_filter_ground_addresses && packet->id.src > 8) {
+		csp_log_warn("Frame filtered");
+		csp_buffer_free(packet);
+		return;
+	}
+	packet->id.ext = csp_hton32(packet->id.ext);  // Convert back to network order as the following code expects it
 
 	/* XTEA encrypted packet */
 	if (conf.rx_use_xtea) {
@@ -310,7 +320,7 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 		int ret = csp_crc32_verify(packet, true);
 		if (ret != CSP_ERR_NONE)
 		{
-			csp_log_warn("CRC failed %d", ret);
+			csp_log_error("CRC failed %d", ret);
 			csp_buffer_free(packet);
 			stats.rx_failed++;
 			return;
@@ -331,13 +341,6 @@ void CSPSuoAdapter::sinkFrame(const Frame &frame, Timestamp now)
 
 	/* Convert the packet from network to host order */
 	packet->id.ext = csp_ntoh32(packet->id.ext);
-
-	/* Ignore frame if source port indicates that is coming from ground segment. */
-	if (conf.rx_filter_ground_addresses && packet->id.src > 8) {
-		csp_log_info("Frame filtered");
-		csp_buffer_free(packet);
-		return;
-	}
 
 	stats.rx_bytes += packet->length;
 
